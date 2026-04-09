@@ -4,11 +4,10 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
-import pytesseract
 import math
 
 st.set_page_config(layout="wide")
-st.title("🏢 NT Auto Scanner")
+st.title("🏢 NT Auto Scanner (FIXED)")
 
 uploaded = st.file_uploader("Upload planą", type=["png","jpg","jpeg","pdf"])
 
@@ -36,91 +35,57 @@ if uploaded:
     }[direction]
 
     # =========================
-    # OCR TABLE (dešinė pusė)
-    # =========================
-    h, w, _ = img.shape
-    table = img[:, int(w*0.7):]
-
-    gray_t = cv2.cvtColor(table, cv2.COLOR_BGR2GRAY)
-
-    data = pytesseract.image_to_data(gray_t, output_type=pytesseract.Output.DICT)
-
-    areas = []
-    labels = []
-
-    for i, text in enumerate(data["text"]):
-        t = text.strip().replace(",", ".")
-
-        if t.startswith("B"):
-            labels.append(t)
-
-        try:
-            val = float(t)
-            if 20 < val < 200:
-                areas.append(val)
-        except:
-            pass
-
-    # =========================
-    # BUTŲ DETECTION
+    # GRAYSCALE
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    thresh = cv2.adaptiveThreshold(
-        gray,255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        15,2
-    )
+    # stipresnis kontrastas
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
 
-    kernel = np.ones((3,3), np.uint8)
-    walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    edges = cv2.Canny(blur, 50, 150)
 
-    inv = cv2.bitwise_not(walls)
+    st.image(edges, caption="DEBUG edges")
 
-    mask = np.zeros((gray.shape[0]+2, gray.shape[1]+2), np.uint8)
-    flood = inv.copy()
-    cv2.floodFill(flood, mask, (0,0), 0)
-
-    apartments_mask = inv - flood
-
-    contours,_ = cv2.findContours(
-        apartments_mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
+    # =========================
+    # FIND CONTOURS
+    # =========================
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     polygons = []
 
     for cnt in contours:
-        if 6000 < cv2.contourArea(cnt) < 150000:
-            pts = [(p[0][0],p[0][1]) for p in cnt]
-            polygons.append(Polygon(pts))
+        area = cv2.contourArea(cnt)
 
+        # filtrai – svarbiausia dalis
+        if 15000 < area < 300000:
+            pts = [(p[0][0], p[0][1]) for p in cnt]
+
+            if len(pts) >= 4:
+                polygons.append(Polygon(pts))
+
+    # rūšiavimas
     polygons = sorted(polygons, key=lambda p: p.centroid.x)
 
     st.write(f"🏠 Butų: {len(polygons)}")
 
     # =========================
-    # LANGAI
+    # LANGŲ DETECTION
     # =========================
     def get_windows(poly):
-        edges=[]
-        coords=list(poly.exterior.coords)
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges = []
+        coords = list(poly.exterior.coords)
 
         for i in range(len(coords)-1):
-            p1=coords[i]
-            p2=coords[i+1]
+            p1 = coords[i]
+            p2 = coords[i+1]
 
-            line=LineString([p1,p2])
+            line = LineString([p1, p2])
 
-            if line.length < 40:
+            if line.length < 50:
                 continue
 
-            mx=int((p1[0]+p2[0])/2)
-            my=int((p1[1]+p2[1])/2)
+            mx = int((p1[0]+p2[0])/2)
+            my = int((p1[1]+p2[1])/2)
 
             patch = gray[max(0,my-6):my+6, max(0,mx-6):mx+6]
 
@@ -133,7 +98,7 @@ if uploaded:
         return edges
 
     def classify(v):
-        dirs=["N","NE","E","SE","S","SW","W","NW"]
+        dirs = ["N","NE","E","SE","S","SW","W","NW"]
         ang = math.degrees(math.atan2(v[1], v[0]))
         ang = (ang+360)%360
         return dirs[int((ang+22.5)//45)%8]
@@ -141,27 +106,23 @@ if uploaded:
     # =========================
     # RESULTS
     # =========================
-    results=[]
+    results = []
 
     for i, poly in enumerate(polygons):
-        dirs=set()
+        dirs = set()
 
         for e in get_windows(poly):
-            x1,y1=e.coords[0]
-            x2,y2=e.coords[1]
+            x1,y1 = e.coords[0]
+            x2,y2 = e.coords[1]
 
-            v=np.array([x2-x1,y2-y1])
+            v = np.array([x2-x1, y2-y1])
             dirs.add(classify(v))
 
-        name = labels[i] if i < len(labels) else f"B{i+1}"
-        area = areas[i] if i < len(areas) else None
-
         results.append({
-            "Apartment": name,
-            "Area_m2": area,
-            "Directions": ", ".join(sorted(dirs))
+            "Apartment": f"B{i+1}",
+            "Directions": ", ".join(sorted(dirs)) if dirs else "?"
         })
 
-    df=pd.DataFrame(results)
+    df = pd.DataFrame(results)
 
     st.dataframe(df)
