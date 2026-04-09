@@ -4,12 +4,11 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
-import pytesseract
 import math
 
 st.set_page_config(layout="wide")
 
-st.title("🏢 NT Butų Scanner PRO")
+st.title("🏢 NT Butų Scanner")
 
 uploaded = st.file_uploader("Upload planą (PNG / JPG / PDF)", type=["png", "jpg", "jpeg", "pdf"])
 
@@ -29,7 +28,7 @@ if uploaded:
     st.image(img, caption="Planas", use_container_width=True)
 
     # =========================
-    # NORTH
+    # NORTH (paprasta)
     # =========================
     st.subheader("🧭 Šiaurės kryptis")
 
@@ -54,19 +53,26 @@ if uploaded:
 
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    kernel = np.ones((5,5), np.uint8)
+    # išryškinam sienas
+    kernel = np.ones((5, 5), np.uint8)
     walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
 
+    # invertuojam
     inv = cv2.bitwise_not(walls)
 
+    # flood fill (pašalinti išorę)
     h, w = inv.shape
-    mask = np.zeros((h+2, w+2), np.uint8)
+    mask = np.zeros((h + 2, w + 2), np.uint8)
 
     flood = inv.copy()
-    cv2.floodFill(flood, mask, (0,0), 0)
+    cv2.floodFill(flood, mask, (0, 0), 0)
 
+    # lieka tik uždaros zonos = butai
     apartments_mask = inv - flood
 
+    # =========================
+    # FIND APARTMENTS
+    # =========================
     contours, _ = cv2.findContours(
         apartments_mask,
         cv2.RETR_EXTERNAL,
@@ -86,58 +92,7 @@ if uploaded:
                 polygons.append(Polygon(pts))
 
     # =========================
-    # OCR → BUTŲ NUMERIAI
-    # =========================
-    def detect_labels(img):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
-
-        labels = []
-
-        for i, text in enumerate(data["text"]):
-            t = text.strip()
-
-            if t.startswith("B") and len(t) <= 3:
-                x = data["left"][i]
-                y = data["top"][i]
-
-                labels.append({
-                    "text": t,
-                    "pos": np.array([x, y])
-                })
-
-        return labels
-
-    labels = detect_labels(img)
-
-    # =========================
-    # MATCH BUTAS ↔ LABEL
-    # =========================
-    def match_apartments(polygons, labels):
-        names = []
-
-        for poly in polygons:
-            c = np.array([poly.centroid.x, poly.centroid.y])
-
-            best = "UNKNOWN"
-            min_dist = 1e9
-
-            for lab in labels:
-                dist = np.linalg.norm(c - lab["pos"])
-
-                if dist < min_dist:
-                    min_dist = dist
-                    best = lab["text"]
-
-            names.append(best)
-
-        return names
-
-    names = match_apartments(polygons, labels)
-
-    # =========================
-    # VECTOR MATH
+    # VECTOR FUNKCIJOS
     # =========================
     def unit(v):
         return v / np.linalg.norm(v)
@@ -151,15 +106,18 @@ if uploaded:
         )
 
     def classify(a):
-        dirs = ["N","NE","E","SE","S","SW","W","NW"]
-        return dirs[int((a+22.5)//45)%8]
+        dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        return dirs[int((a + 22.5) // 45) % 8]
 
+    # =========================
+    # IŠORINĖS SIENOS
+    # =========================
     def get_external_edges(poly):
         edges = []
         coords = list(poly.exterior.coords)
 
-        for i in range(len(coords)-1):
-            e = LineString([coords[i], coords[i+1]])
+        for i in range(len(coords) - 1):
+            e = LineString([coords[i], coords[i + 1]])
 
             is_external = True
 
@@ -174,7 +132,7 @@ if uploaded:
         return edges
 
     # =========================
-    # CALCULATE
+    # SKAIČIAVIMAS
     # =========================
     results = []
 
@@ -192,7 +150,7 @@ if uploaded:
             dirs.add(classify(ang))
 
         results.append({
-            "Apartment": names[i],
+            "Apartment": f"A{i+1}",
             "Directions": ", ".join(sorted(dirs))
         })
 
@@ -201,6 +159,9 @@ if uploaded:
     st.subheader("📊 Rezultatai")
     st.dataframe(df, use_container_width=True)
 
+    # =========================
+    # DOWNLOAD
+    # =========================
     csv = df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
