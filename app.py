@@ -4,11 +4,10 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
-import pytesseract
 import math
 
 st.set_page_config(layout="wide")
-st.title("🏢 NT Scanner PRO")
+st.title("🏢 NT Butų Scanner")
 
 uploaded = st.file_uploader("Upload planą", type=["png","jpg","jpeg","pdf"])
 
@@ -29,7 +28,7 @@ if uploaded:
     # =========================
     # NORTH
     # =========================
-    direction = st.selectbox("Šiaurė", ["Up","Right","Down","Left"])
+    direction = st.selectbox("🧭 Šiaurė", ["Up","Right","Down","Left"])
 
     NORTH = {
         "Up": np.array([0,-1]),
@@ -39,29 +38,32 @@ if uploaded:
     }[direction]
 
     # =========================
-    # WALL DETECTION
+    # PREPROCESS
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    thresh = cv2.adaptiveThreshold(
-        gray,255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY_INV,
-        11,2
-    )
+    # paprastas threshold (stabilus)
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
-    kernel = np.ones((5,5), np.uint8)
-    walls = cv2.dilate(thresh, kernel, iterations=2)
+    # mažesnis kernel → nesujungia visko
+    kernel = np.ones((3,3), np.uint8)
+    walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
 
+    # =========================
+    # FLOOD FILL
+    # =========================
     inv = cv2.bitwise_not(walls)
 
-    h,w = inv.shape
-    mask = np.zeros((h+2,w+2), np.uint8)
+    h, w = inv.shape
+    mask = np.zeros((h+2, w+2), np.uint8)
 
     flood = inv.copy()
-    cv2.floodFill(flood, mask, (0,0), 0)
+    cv2.floodFill(flood, mask, (1,1), 255)
 
-    apartments_mask = inv - flood
+    apartments_mask = cv2.bitwise_not(flood)
+
+    # DEBUG – labai svarbu
+    st.image(apartments_mask, caption="DEBUG butų zonos")
 
     # =========================
     # FIND APARTMENTS
@@ -77,71 +79,52 @@ if uploaded:
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        if 8000 < area < 300000:
+        # lengvesnis filtras
+        if area > 3000:
             approx = cv2.approxPolyDP(cnt,5,True)
             pts = [(p[0][0],p[0][1]) for p in approx]
 
-            if len(pts)>=4:
+            if len(pts) >= 4:
                 polygons.append(Polygon(pts))
 
-    # =========================
-    # SORT LEFT → RIGHT
-    # =========================
-    polygons = sorted(polygons, key=lambda p: p.centroid.x)
+    st.write(f"🏠 Butų: {len(polygons)}")
 
     # =========================
-    # OCR TABLE (dešinė pusė)
+    # VECTOR FUNKCIJOS
     # =========================
-    h, w, _ = img.shape
-    table_crop = img[:, int(w*0.7):]  # paimam dešinę dalį
+    def unit(v):
+        return v / np.linalg.norm(v)
 
-    gray_table = cv2.cvtColor(table_crop, cv2.COLOR_BGR2GRAY)
+    def normal(v):
+        return np.array([-v[1], v[0]])
 
-    data = pytesseract.image_to_data(gray_table, output_type=pytesseract.Output.DICT)
-
-    areas = []
-
-    for i, text in enumerate(data["text"]):
-        t = text.strip().replace(",", ".")
-
-        try:
-            val = float(t)
-            if 20 < val < 200:  # butų plotai
-                areas.append(val)
-        except:
-            pass
-
-    areas = sorted(areas, reverse=True)
-
-    # =========================
-    # VECTOR MATH
-    # =========================
-    def unit(v): return v/np.linalg.norm(v)
-    def normal(v): return np.array([-v[1],v[0]])
-
-    def angle(v1,v2):
+    def angle(v1, v2):
         return math.degrees(
-            math.acos(np.clip(np.dot(unit(v1),unit(v2)),-1,1))
+            math.acos(np.clip(np.dot(unit(v1), unit(v2)), -1, 1))
         )
 
     def classify(a):
-        dirs=["N","NE","E","SE","S","SW","W","NW"]
+        dirs = ["N","NE","E","SE","S","SW","W","NW"]
         return dirs[int((a+22.5)//45)%8]
 
-    def get_edges(poly):
-        edges=[]
-        coords=list(poly.exterior.coords)
+    # =========================
+    # EXTERNAL EDGES
+    # =========================
+    def get_external_edges(poly):
+        edges = []
+        coords = list(poly.exterior.coords)
 
         for i in range(len(coords)-1):
-            e=LineString([coords[i],coords[i+1]])
+            e = LineString([coords[i], coords[i+1]])
 
-            ext=True
-            for o in polygons:
-                if o!=poly and e.buffer(5).intersects(o):
-                    ext=False
+            is_external = True
+
+            for other in polygons:
+                if other != poly and e.buffer(5).intersects(other):
+                    is_external = False
                     break
 
-            if ext and e.length>50:
+            if is_external and e.length > 40:
                 edges.append(e)
 
         return edges
@@ -149,32 +132,30 @@ if uploaded:
     # =========================
     # RESULTS
     # =========================
-    results=[]
+    results = []
 
     for i, poly in enumerate(polygons):
-        dirs=set()
+        dirs = set()
 
-        for e in get_edges(poly):
-            x1,y1=e.coords[0]
-            x2,y2=e.coords[1]
+        for edge in get_external_edges(poly):
+            x1, y1 = edge.coords[0]
+            x2, y2 = edge.coords[1]
 
-            v=np.array([x2-x1,y2-y1])
-            n=normal(v)
+            v = np.array([x2 - x1, y2 - y1])
+            n = normal(v)
 
-            dirs.add(classify(angle(n,NORTH)))
-
-        area_val = areas[i] if i < len(areas) else None
+            ang = angle(n, NORTH)
+            dirs.add(classify(ang))
 
         results.append({
-            "Apartment": f"B{i+1}",
-            "Area_m2": area_val,
+            "Apartment": f"A{i+1}",
+            "Area_px": int(poly.area),
             "Directions": ", ".join(sorted(dirs))
         })
 
     df = pd.DataFrame(results)
 
-    st.write(f"🏠 Butų: {len(df)}")
-    st.dataframe(df)
+    st.dataframe(df, use_container_width=True)
 
     st.download_button(
         "📥 CSV",
