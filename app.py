@@ -28,26 +28,28 @@ if uploaded:
     st.image(img, caption="Planas", use_container_width=True)
 
     # =========================
-    # NORTH VECTOR
+    # NORTH (PAPRASTAS)
     # =========================
-    st.subheader("🧭 Šiaurės kryptis (vector)")
+    st.subheader("🧭 Šiaurės kryptis")
 
-    col1, col2 = st.columns(2)
+    direction_choice = st.selectbox(
+        "Pasirink kryptį (kur plane yra šiaurė)",
+        ["Up (↑)", "Right (→)", "Down (↓)", "Left (←)"]
+    )
 
-    with col1:
-        nx = st.number_input("North X", value=0.0)
-
-    with col2:
-        ny = st.number_input("North Y", value=1.0)
-
-    NORTH = np.array([nx, ny])
-    NORTH = NORTH / np.linalg.norm(NORTH)
+    if direction_choice == "Up (↑)":
+        NORTH = np.array([0, -1])
+    elif direction_choice == "Down (↓)":
+        NORTH = np.array([0, 1])
+    elif direction_choice == "Left (←)":
+        NORTH = np.array([-1, 0])
+    else:
+        NORTH = np.array([1, 0])
 
     # =========================
     # SCALE
     # =========================
     st.subheader("📐 Scale")
-
     ppm = st.number_input("Pixels per meter", value=100)
 
     # =========================
@@ -58,23 +60,31 @@ if uploaded:
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
     # =========================
-    # FIND APARTMENTS
+    # FIND APARTMENTS (FIXED)
     # =========================
-    contours, _ = cv2.findContours(
+    contours, hierarchy = cv2.findContours(
         thresh,
-        cv2.RETR_EXTERNAL,
+        cv2.RETR_TREE,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
     polygons = []
 
     for cnt in contours:
-        if cv2.contourArea(cnt) > 4000:
-            approx = cv2.approxPolyDP(cnt, 5, True)
-            pts = [(p[0][0], p[0][1]) for p in approx]
+        area = cv2.contourArea(cnt)
 
-            if len(pts) >= 4:
-                polygons.append(Polygon(pts))
+        if 2000 < area < 50000:
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = w / h if h != 0 else 0
+
+            if 0.3 < aspect_ratio < 3:
+
+                approx = cv2.approxPolyDP(cnt, 5, True)
+                pts = [(p[0][0], p[0][1]) for p in approx]
+
+                if len(pts) >= 4:
+                    polygons.append(Polygon(pts))
 
     # =========================
     # HELPERS
