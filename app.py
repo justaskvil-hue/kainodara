@@ -4,16 +4,20 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
+import pytesseract
 import math
 
 st.set_page_config(layout="wide")
-st.title("🏢 NT Auto Scanner (FIXED)")
+st.title("🏢 NT Auto Scanner (FINAL)")
 
 uploaded = st.file_uploader("Upload planą", type=["png","jpg","jpeg","pdf"])
 
 if uploaded:
     file_bytes = uploaded.read()
 
+    # =========================
+    # LOAD IMAGE
+    # =========================
     if uploaded.name.endswith(".pdf"):
         pages = convert_from_bytes(file_bytes, dpi=300)
         img = np.array(pages[0])
@@ -35,20 +39,38 @@ if uploaded:
     }[direction]
 
     # =========================
-    # GRAYSCALE
+    # OCR – LENTELĖ
+    # =========================
+    h, w, _ = img.shape
+    table = img[:, int(w*0.7):]
+
+    gray_t = cv2.cvtColor(table, cv2.COLOR_BGR2GRAY)
+
+    data = pytesseract.image_to_data(gray_t, output_type=pytesseract.Output.DICT)
+
+    areas = []
+
+    for text in data["text"]:
+        t = text.strip().replace(",", ".")
+        try:
+            val = float(t)
+            if 20 < val < 200:
+                areas.append(val)
+        except:
+            pass
+
+    areas = sorted(areas, reverse=True)
+
+    # =========================
+    # BUTŲ DETECTION
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # stipresnis kontrastas
     blur = cv2.GaussianBlur(gray, (5,5), 0)
 
     edges = cv2.Canny(blur, 50, 150)
 
     st.image(edges, caption="DEBUG edges")
 
-    # =========================
-    # FIND CONTOURS
-    # =========================
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     polygons = []
@@ -56,14 +78,19 @@ if uploaded:
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        # filtrai – svarbiausia dalis
-        if 15000 < area < 300000:
+        if area > 20000:
             pts = [(p[0][0], p[0][1]) for p in cnt]
 
             if len(pts) >= 4:
-                polygons.append(Polygon(pts))
+                polygons.append((Polygon(pts), area))
 
-    # rūšiavimas
+    # =========================
+    # IMAM TIK DIDŽIAUSIUS (BUTAI)
+    # =========================
+    polygons = sorted(polygons, key=lambda x: x[1], reverse=True)
+    polygons = [p[0] for p in polygons[:5]]
+
+    # rūšiavimas pagal X
     polygons = sorted(polygons, key=lambda p: p.centroid.x)
 
     st.write(f"🏠 Butų: {len(polygons)}")
@@ -79,9 +106,9 @@ if uploaded:
             p1 = coords[i]
             p2 = coords[i+1]
 
-            line = LineString([p1, p2])
+            line = LineString([p1,p2])
 
-            if line.length < 50:
+            if line.length < 60:
                 continue
 
             mx = int((p1[0]+p2[0])/2)
@@ -92,7 +119,9 @@ if uploaded:
             if patch.size == 0:
                 continue
 
-            if np.mean(patch) > 170:
+            val = np.mean(patch)
+
+            if 180 < val < 240:
                 edges.append(line)
 
         return edges
@@ -118,8 +147,11 @@ if uploaded:
             v = np.array([x2-x1, y2-y1])
             dirs.add(classify(v))
 
+        area_val = areas[i] if i < len(areas) else None
+
         results.append({
             "Apartment": f"B{i+1}",
+            "Area_m2": area_val,
             "Directions": ", ".join(sorted(dirs)) if dirs else "?"
         })
 
