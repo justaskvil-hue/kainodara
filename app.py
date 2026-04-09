@@ -7,7 +7,7 @@ from pdf2image import convert_from_bytes
 import math
 
 st.set_page_config(layout="wide")
-st.title("🏢 NT Butų Scanner")
+st.title("🏢 NT Scanner PRO")
 
 uploaded = st.file_uploader("Upload planą", type=["png","jpg","jpeg","pdf"])
 
@@ -38,45 +38,42 @@ if uploaded:
     }[direction]
 
     # =========================
-    # PLOTŲ ĮVESTIS
+    # PLOTŲ INPUT
     # =========================
-    st.subheader("📐 Butų plotai (iš lentelės)")
-
-    area_input = st.text_area(
-        "Įklijuok plotus (pvz: 46.92, 29.06, 55.95)",
-        ""
-    )
+    st.subheader("📐 Plotai (iš lentelės)")
+    area_input = st.text_area("Pvz: 46.92, 29.06, 29.97, 59.32, 55.95")
 
     areas = []
-
     if area_input:
         try:
             areas = [float(x.strip().replace(",", ".")) for x in area_input.split(",")]
         except:
-            st.warning("Blogas plotų formatas")
+            st.warning("Blogas formatas")
 
     # =========================
     # IMAGE PROCESSING
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+    thresh = cv2.adaptiveThreshold(
+        gray,255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        15,2
+    )
 
     kernel = np.ones((3,3), np.uint8)
-    walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    # =========================
-    # FLOOD FILL
-    # =========================
     inv = cv2.bitwise_not(walls)
 
     h, w = inv.shape
     mask = np.zeros((h+2, w+2), np.uint8)
 
     flood = inv.copy()
-    cv2.floodFill(flood, mask, (1,1), 255)
+    cv2.floodFill(flood, mask, (0,0), 0)
 
-    apartments_mask = cv2.bitwise_not(flood)
+    apartments_mask = inv - flood
 
     st.image(apartments_mask, caption="DEBUG butų zonos")
 
@@ -94,16 +91,13 @@ if uploaded:
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        if area > 3000:
+        if 6000 < area < 150000:
             approx = cv2.approxPolyDP(cnt,5,True)
             pts = [(p[0][0],p[0][1]) for p in approx]
 
-            if len(pts) >= 4:
+            if len(pts)>=4:
                 polygons.append(Polygon(pts))
 
-    # =========================
-    # SORT LEFT → RIGHT
-    # =========================
     polygons = sorted(polygons, key=lambda p: p.centroid.x)
 
     st.write(f"🏠 Butų: {len(polygons)}")
@@ -111,72 +105,84 @@ if uploaded:
     # =========================
     # MATH
     # =========================
-    def unit(v):
-        return v / np.linalg.norm(v)
+    def unit(v): return v/np.linalg.norm(v)
+    def normal(v): return np.array([-v[1],v[0]])
 
-    def normal(v):
-        return np.array([-v[1], v[0]])
-
-    def angle(v1, v2):
+    def angle(v1,v2):
         return math.degrees(
-            math.acos(np.clip(np.dot(unit(v1), unit(v2)), -1, 1))
+            math.acos(np.clip(np.dot(unit(v1),unit(v2)),-1,1))
         )
 
     def classify(a):
-        dirs = ["N","NE","E","SE","S","SW","W","NW"]
+        dirs=["N","NE","E","SE","S","SW","W","NW"]
         return dirs[int((a+22.5)//45)%8]
 
-    def get_external_edges(poly):
-        edges = []
-        coords = list(poly.exterior.coords)
+    # =========================
+    # LANGŲ DETECTION (KEY PART)
+    # =========================
+    def get_window_edges(poly, img):
+        edges=[]
+        coords=list(poly.exterior.coords)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         for i in range(len(coords)-1):
-            e = LineString([coords[i], coords[i+1]])
+            p1 = coords[i]
+            p2 = coords[i+1]
 
-            is_external = True
+            line = LineString([p1,p2])
 
-            for other in polygons:
-                if other != poly and e.buffer(5).intersects(other):
-                    is_external = False
-                    break
+            if line.length < 40:
+                continue
 
-            if is_external and e.length > 40:
-                edges.append(e)
+            x1,y1 = int(p1[0]), int(p1[1])
+            x2,y2 = int(p2[0]), int(p2[1])
+
+            mx = int((x1+x2)/2)
+            my = int((y1+y2)/2)
+
+            patch = gray[max(0,my-6):my+6, max(0,mx-6):mx+6]
+
+            if patch.size == 0:
+                continue
+
+            avg = np.mean(patch)
+
+            # langai = šviesesni nei sienos
+            if avg > 170:
+                edges.append(line)
 
         return edges
 
     # =========================
     # RESULTS
     # =========================
-    results = []
+    results=[]
 
     for i, poly in enumerate(polygons):
-        dirs = set()
+        dirs=set()
 
-        for edge in get_external_edges(poly):
-            x1, y1 = edge.coords[0]
-            x2, y2 = edge.coords[1]
+        window_edges = get_window_edges(poly, img)
 
-            v = np.array([x2 - x1, y2 - y1])
-            n = normal(v)
+        for e in window_edges:
+            x1,y1=e.coords[0]
+            x2,y2=e.coords[1]
 
-            ang = angle(n, NORTH)
-            dirs.add(classify(ang))
+            v=np.array([x2-x1,y2-y1])
+            n=normal(v)
+
+            dirs.add(classify(angle(n,NORTH)))
 
         area_val = areas[i] if i < len(areas) else None
 
         results.append({
             "Apartment": f"B{i+1}",
             "Area_m2": area_val,
-            "Directions": ", ".join(sorted(dirs))
+            "Directions": ", ".join(sorted(dirs)) if dirs else "?"
         })
 
-    df = pd.DataFrame(results)
+    df=pd.DataFrame(results)
 
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df)
 
-    st.download_button(
-        "📥 CSV",
-        df.to_csv(index=False),
-        "butai.csv"
-    )
+    st.download_button("📥 CSV", df.to_csv(index=False), "butai.csv")
