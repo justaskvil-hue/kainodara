@@ -4,19 +4,17 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
+import pytesseract
 import math
 
 st.set_page_config(layout="wide")
-st.title("🏢 NT Scanner PRO")
+st.title("🏢 NT Auto Scanner")
 
 uploaded = st.file_uploader("Upload planą", type=["png","jpg","jpeg","pdf"])
 
 if uploaded:
     file_bytes = uploaded.read()
 
-    # =========================
-    # LOAD IMAGE
-    # =========================
     if uploaded.name.endswith(".pdf"):
         pages = convert_from_bytes(file_bytes, dpi=300)
         img = np.array(pages[0])
@@ -28,7 +26,7 @@ if uploaded:
     # =========================
     # NORTH
     # =========================
-    direction = st.selectbox("🧭 Šiaurė", ["Up","Right","Down","Left"])
+    direction = st.selectbox("Šiaurė", ["Up","Right","Down","Left"])
 
     NORTH = {
         "Up": np.array([0,-1]),
@@ -38,20 +36,33 @@ if uploaded:
     }[direction]
 
     # =========================
-    # PLOTŲ INPUT
+    # OCR TABLE (dešinė pusė)
     # =========================
-    st.subheader("📐 Plotai (iš lentelės)")
-    area_input = st.text_area("Pvz: 46.92, 29.06, 29.97, 59.32, 55.95")
+    h, w, _ = img.shape
+    table = img[:, int(w*0.7):]
+
+    gray_t = cv2.cvtColor(table, cv2.COLOR_BGR2GRAY)
+
+    data = pytesseract.image_to_data(gray_t, output_type=pytesseract.Output.DICT)
 
     areas = []
-    if area_input:
+    labels = []
+
+    for i, text in enumerate(data["text"]):
+        t = text.strip().replace(",", ".")
+
+        if t.startswith("B"):
+            labels.append(t)
+
         try:
-            areas = [float(x.strip().replace(",", ".")) for x in area_input.split(",")]
+            val = float(t)
+            if 20 < val < 200:
+                areas.append(val)
         except:
-            st.warning("Blogas formatas")
+            pass
 
     # =========================
-    # IMAGE PROCESSING
+    # BUTŲ DETECTION
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
@@ -67,19 +78,12 @@ if uploaded:
 
     inv = cv2.bitwise_not(walls)
 
-    h, w = inv.shape
-    mask = np.zeros((h+2, w+2), np.uint8)
-
+    mask = np.zeros((gray.shape[0]+2, gray.shape[1]+2), np.uint8)
     flood = inv.copy()
     cv2.floodFill(flood, mask, (0,0), 0)
 
     apartments_mask = inv - flood
 
-    st.image(apartments_mask, caption="DEBUG butų zonos")
-
-    # =========================
-    # FIND APARTMENTS
-    # =========================
     contours,_ = cv2.findContours(
         apartments_mask,
         cv2.RETR_EXTERNAL,
@@ -89,70 +93,50 @@ if uploaded:
     polygons = []
 
     for cnt in contours:
-        area = cv2.contourArea(cnt)
-
-        if 6000 < area < 150000:
-            approx = cv2.approxPolyDP(cnt,5,True)
-            pts = [(p[0][0],p[0][1]) for p in approx]
-
-            if len(pts)>=4:
-                polygons.append(Polygon(pts))
+        if 6000 < cv2.contourArea(cnt) < 150000:
+            pts = [(p[0][0],p[0][1]) for p in cnt]
+            polygons.append(Polygon(pts))
 
     polygons = sorted(polygons, key=lambda p: p.centroid.x)
 
     st.write(f"🏠 Butų: {len(polygons)}")
 
     # =========================
-    # MATH
+    # LANGAI
     # =========================
-    def unit(v): return v/np.linalg.norm(v)
-    def normal(v): return np.array([-v[1],v[0]])
-
-    def angle(v1,v2):
-        return math.degrees(
-            math.acos(np.clip(np.dot(unit(v1),unit(v2)),-1,1))
-        )
-
-    def classify(a):
-        dirs=["N","NE","E","SE","S","SW","W","NW"]
-        return dirs[int((a+22.5)//45)%8]
-
-    # =========================
-    # LANGŲ DETECTION (KEY PART)
-    # =========================
-    def get_window_edges(poly, img):
+    def get_windows(poly):
         edges=[]
         coords=list(poly.exterior.coords)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         for i in range(len(coords)-1):
-            p1 = coords[i]
-            p2 = coords[i+1]
+            p1=coords[i]
+            p2=coords[i+1]
 
-            line = LineString([p1,p2])
+            line=LineString([p1,p2])
 
             if line.length < 40:
                 continue
 
-            x1,y1 = int(p1[0]), int(p1[1])
-            x2,y2 = int(p2[0]), int(p2[1])
-
-            mx = int((x1+x2)/2)
-            my = int((y1+y2)/2)
+            mx=int((p1[0]+p2[0])/2)
+            my=int((p1[1]+p2[1])/2)
 
             patch = gray[max(0,my-6):my+6, max(0,mx-6):mx+6]
 
             if patch.size == 0:
                 continue
 
-            avg = np.mean(patch)
-
-            # langai = šviesesni nei sienos
-            if avg > 170:
+            if np.mean(patch) > 170:
                 edges.append(line)
 
         return edges
+
+    def classify(v):
+        dirs=["N","NE","E","SE","S","SW","W","NW"]
+        ang = math.degrees(math.atan2(v[1], v[0]))
+        ang = (ang+360)%360
+        return dirs[int((ang+22.5)//45)%8]
 
     # =========================
     # RESULTS
@@ -162,27 +146,22 @@ if uploaded:
     for i, poly in enumerate(polygons):
         dirs=set()
 
-        window_edges = get_window_edges(poly, img)
-
-        for e in window_edges:
+        for e in get_windows(poly):
             x1,y1=e.coords[0]
             x2,y2=e.coords[1]
 
             v=np.array([x2-x1,y2-y1])
-            n=normal(v)
+            dirs.add(classify(v))
 
-            dirs.add(classify(angle(n,NORTH)))
-
-        area_val = areas[i] if i < len(areas) else None
+        name = labels[i] if i < len(labels) else f"B{i+1}"
+        area = areas[i] if i < len(areas) else None
 
         results.append({
-            "Apartment": f"B{i+1}",
-            "Area_m2": area_val,
-            "Directions": ", ".join(sorted(dirs)) if dirs else "?"
+            "Apartment": name,
+            "Area_m2": area,
+            "Directions": ", ".join(sorted(dirs))
         })
 
     df=pd.DataFrame(results)
 
     st.dataframe(df)
-
-    st.download_button("📥 CSV", df.to_csv(index=False), "butai.csv")
