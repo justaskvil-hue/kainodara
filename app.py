@@ -4,11 +4,12 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon, LineString
 from pdf2image import convert_from_bytes
+import pytesseract
 import math
 
 st.set_page_config(layout="wide")
 
-st.title("🏢 NT Butų Scanner")
+st.title("🏢 NT Butų Scanner PRO")
 
 uploaded = st.file_uploader("Upload planą (PNG / JPG / PDF)", type=["png", "jpg", "jpeg", "pdf"])
 
@@ -28,12 +29,12 @@ if uploaded:
     st.image(img, caption="Planas", use_container_width=True)
 
     # =========================
-    # NORTH (PAPRASTAS)
+    # NORTH
     # =========================
     st.subheader("🧭 Šiaurės kryptis")
 
     direction_choice = st.selectbox(
-        "Pasirink kryptį (kur plane yra šiaurė)",
+        "Pasirink kryptį",
         ["Up (↑)", "Right (→)", "Down (↓)", "Left (←)"]
     )
 
@@ -47,24 +48,28 @@ if uploaded:
         NORTH = np.array([1, 0])
 
     # =========================
-    # SCALE
-    # =========================
-    st.subheader("📐 Scale")
-    ppm = st.number_input("Pixels per meter", value=100)
-
-    # =========================
-    # PREPROCESS
+    # DETECT WALLS → BUTAI
     # =========================
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    # =========================
-    # FIND APARTMENTS (FIXED)
-    # =========================
-    contours, hierarchy = cv2.findContours(
-        thresh,
-        cv2.RETR_TREE,
+    kernel = np.ones((5,5), np.uint8)
+    walls = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+
+    inv = cv2.bitwise_not(walls)
+
+    h, w = inv.shape
+    mask = np.zeros((h+2, w+2), np.uint8)
+
+    flood = inv.copy()
+    cv2.floodFill(flood, mask, (0,0), 0)
+
+    apartments_mask = inv - flood
+
+    contours, _ = cv2.findContours(
+        apartments_mask,
+        cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
@@ -73,21 +78,66 @@ if uploaded:
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        if 2000 < area < 50000:
+        if 5000 < area < 200000:
+            approx = cv2.approxPolyDP(cnt, 5, True)
+            pts = [(p[0][0], p[0][1]) for p in approx]
 
-            x, y, w, h = cv2.boundingRect(cnt)
-            aspect_ratio = w / h if h != 0 else 0
-
-            if 0.3 < aspect_ratio < 3:
-
-                approx = cv2.approxPolyDP(cnt, 5, True)
-                pts = [(p[0][0], p[0][1]) for p in approx]
-
-                if len(pts) >= 4:
-                    polygons.append(Polygon(pts))
+            if len(pts) >= 4:
+                polygons.append(Polygon(pts))
 
     # =========================
-    # HELPERS
+    # OCR → BUTŲ NUMERIAI
+    # =========================
+    def detect_labels(img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
+
+        labels = []
+
+        for i, text in enumerate(data["text"]):
+            t = text.strip()
+
+            if t.startswith("B") and len(t) <= 3:
+                x = data["left"][i]
+                y = data["top"][i]
+
+                labels.append({
+                    "text": t,
+                    "pos": np.array([x, y])
+                })
+
+        return labels
+
+    labels = detect_labels(img)
+
+    # =========================
+    # MATCH BUTAS ↔ LABEL
+    # =========================
+    def match_apartments(polygons, labels):
+        names = []
+
+        for poly in polygons:
+            c = np.array([poly.centroid.x, poly.centroid.y])
+
+            best = "UNKNOWN"
+            min_dist = 1e9
+
+            for lab in labels:
+                dist = np.linalg.norm(c - lab["pos"])
+
+                if dist < min_dist:
+                    min_dist = dist
+                    best = lab["text"]
+
+            names.append(best)
+
+        return names
+
+    names = match_apartments(polygons, labels)
+
+    # =========================
+    # VECTOR MATH
     # =========================
     def unit(v):
         return v / np.linalg.norm(v)
@@ -101,15 +151,15 @@ if uploaded:
         )
 
     def classify(a):
-        dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-        return dirs[int((a + 22.5) // 45) % 8]
+        dirs = ["N","NE","E","SE","S","SW","W","NW"]
+        return dirs[int((a+22.5)//45)%8]
 
     def get_external_edges(poly):
         edges = []
         coords = list(poly.exterior.coords)
 
-        for i in range(len(coords) - 1):
-            e = LineString([coords[i], coords[i + 1]])
+        for i in range(len(coords)-1):
+            e = LineString([coords[i], coords[i+1]])
 
             is_external = True
 
@@ -141,11 +191,8 @@ if uploaded:
             ang = angle(n, NORTH)
             dirs.add(classify(ang))
 
-        area_m2 = poly.area / (ppm ** 2)
-
         results.append({
-            "Apartment": f"A{i+1}",
-            "Area_m2": round(area_m2, 2),
+            "Apartment": names[i],
             "Directions": ", ".join(sorted(dirs))
         })
 
@@ -154,9 +201,6 @@ if uploaded:
     st.subheader("📊 Rezultatai")
     st.dataframe(df, use_container_width=True)
 
-    # =========================
-    # DOWNLOAD
-    # =========================
     csv = df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
